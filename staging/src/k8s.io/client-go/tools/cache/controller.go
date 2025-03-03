@@ -19,13 +19,14 @@ package cache
 import (
 	"context"
 	"errors"
-	clientgofeaturegate "k8s.io/client-go/features"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientgofeaturegate "k8s.io/client-go/features"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 )
 
@@ -180,7 +181,7 @@ func (c *controller) RunWithContext(ctx context.Context) {
 
 	wg.StartWithContext(ctx, r.RunWithContext)
 
-	wait.UntilWithContext(ctx, c.processLoop, time.Second)
+	wg.StartWithContext(ctx, c.processLoop)
 	wg.Wait()
 }
 
@@ -203,16 +204,13 @@ func (c *controller) LastSyncResourceVersion() string {
 // to make sure that we don't end up processing the same object multiple times
 // concurrently.
 func (c *controller) processLoop(ctx context.Context) {
-	for {
-		// TODO: Plumb through the ctx so that this can
-		// actually exit when the controller is stopped. Or just give up on this stuff
-		// ever being stoppable.
-		_, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
-		if err != nil {
-			if err == ErrFIFOClosed {
-				return
-			}
+	logger := klog.FromContext(ctx)
+	_, err := c.config.Queue.Pop(PopProcessFunc(c.config.Process))
+	if err != nil {
+		if err == ErrFIFOClosed {
+			return
 		}
+		logger.Error(err, "Failed to process item from queue")
 	}
 }
 

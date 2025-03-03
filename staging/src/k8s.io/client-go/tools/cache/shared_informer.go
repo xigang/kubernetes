@@ -540,25 +540,27 @@ func (s *sharedIndexInformer) RunWithContext(ctx context.Context) {
 		s.startedLock.Lock()
 		defer s.startedLock.Unlock()
 
-		var fifo Queue
-		if clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InOrderInformers) {
-			fifo = NewRealFIFO(MetaNamespaceKeyFunc, s.indexer, s.transform)
-		} else {
-			fifo = NewDeltaFIFOWithOptions(DeltaFIFOOptions{
-				KnownObjects:          s.indexer,
-				EmitDeltaTypeReplaced: true,
-				Transformer:           s.transform,
-			})
+		// Create SharedDeltaFIFO with sharding
+		fifo, err := NewShardedDeltaFIFO(ShardedDeltaFIFOOptions{
+			ShardNumber:           4,
+			VirtualNodes:          10,
+			KeyFunction:           DeletionHandlingMetaNamespaceKeyFunc,
+			KnownObjects:          s.indexer,
+			EmitDeltaTypeReplaced: true,
+			Transformer:           s.transform,
+			Logger:                klog.Background(),
+		})
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create SharedDeltaFIFO: %v", err))
 		}
 
 		cfg := &Config{
-			Queue:             fifo,
-			ListerWatcher:     s.listerWatcher,
-			ObjectType:        s.objectType,
-			ObjectDescription: s.objectDescription,
-			FullResyncPeriod:  s.resyncCheckPeriod,
-			ShouldResync:      s.processor.shouldResync,
-
+			Queue:                        fifo,
+			ListerWatcher:                s.listerWatcher,
+			ObjectType:                   s.objectType,
+			ObjectDescription:            s.objectDescription,
+			FullResyncPeriod:             s.resyncCheckPeriod,
+			ShouldResync:                 s.processor.shouldResync,
 			Process:                      s.HandleDeltas,
 			WatchErrorHandlerWithContext: s.watchErrorHandler,
 		}
