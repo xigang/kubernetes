@@ -541,9 +541,22 @@ func (s *sharedIndexInformer) RunWithContext(ctx context.Context) {
 		defer s.startedLock.Unlock()
 
 		var fifo Queue
-		if clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InOrderInformers) {
+		switch {
+		case clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InOrderInformers):
 			fifo = NewRealFIFO(MetaNamespaceKeyFunc, s.indexer, s.transform)
-		} else {
+		case clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.ShardedDeltaFIFOInformer):
+			var err error
+			fifo, err = NewShardedDeltaFIFO(ShardedDeltaFIFOOptions{
+				ShardNumber:  8, // Default to 8 shards
+				VirtualNodes: 10,
+				KeyFunction:  MetaNamespaceKeyFunc,
+				KnownObjects: s.indexer,
+			})
+			if err != nil {
+				logger.Error(err, "Failed to create ShardedDeltaFIFO, falling back to regular DeltaFIFO")
+				return
+			}
+		default:
 			fifo = NewDeltaFIFOWithOptions(DeltaFIFOOptions{
 				KnownObjects:          s.indexer,
 				EmitDeltaTypeReplaced: true,

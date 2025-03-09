@@ -59,6 +59,12 @@ const (
 	// Refactor informers to deliver watch stream events in order instead of out of order.
 	InOrderInformers Feature = "InOrderInformers"
 
+	// owner: @xigang
+	// alpha: v1.33
+	//
+	// Use a sharded DeltaFIFO for each informer.
+	ShardedDeltaFIFOInformer Feature = "ShardedDeltaFIFOInformer"
+
 	// owner: @p0lyn0mial
 	// beta: v1.30
 	//

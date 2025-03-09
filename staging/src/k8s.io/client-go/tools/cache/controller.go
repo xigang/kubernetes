@@ -19,9 +19,10 @@ package cache
 import (
 	"context"
 	"errors"
-	clientgofeaturegate "k8s.io/client-go/features"
 	"sync"
 	"time"
+
+	clientgofeaturegate "k8s.io/client-go/features"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -179,8 +180,8 @@ func (c *controller) RunWithContext(ctx context.Context) {
 	var wg wait.Group
 
 	wg.StartWithContext(ctx, r.RunWithContext)
+	wg.StartWithContext(ctx, c.processLoop)
 
-	wait.UntilWithContext(ctx, c.processLoop, time.Second)
 	wg.Wait()
 }
 
@@ -203,7 +204,10 @@ func (c *controller) LastSyncResourceVersion() string {
 // to make sure that we don't end up processing the same object multiple times
 // concurrently.
 func (c *controller) processLoop(ctx context.Context) {
-	for {
+	select {
+	case <-ctx.Done():
+		return
+	default:
 		// TODO: Plumb through the ctx so that this can
 		// actually exit when the controller is stopped. Or just give up on this stuff
 		// ever being stoppable.
@@ -597,6 +601,17 @@ func newInformer(clientState Store, options InformerOptions) Controller {
 	var fifo Queue
 	if clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InOrderInformers) {
 		fifo = NewRealFIFO(MetaNamespaceKeyFunc, clientState, options.Transform)
+	} else if clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.ShardedDeltaFIFOInformer) {
+		var err error
+		fifo, err = NewShardedDeltaFIFO(ShardedDeltaFIFOOptions{
+			KeyFunction:           MetaNamespaceKeyFunc,
+			KnownObjects:          clientState,
+			EmitDeltaTypeReplaced: true,
+			Transformer:           options.Transform,
+		})
+		if err != nil {
+			panic(err)
+		}
 	} else {
 		fifo = NewDeltaFIFOWithOptions(DeltaFIFOOptions{
 			KnownObjects:          clientState,
