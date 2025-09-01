@@ -35,7 +35,8 @@ type NodeLifecycleControllerConfiguration struct {
 	// to post node status. This value should also be greater than the sum of
 	// HTTP2_PING_TIMEOUT_SECONDS and HTTP2_READ_IDLE_TIMEOUT_SECONDS.
 	NodeMonitorGracePeriod metav1.Duration
-	// secondaryNodeEvictionRate is implicitly overridden to 0 for clusters smaller than or equal to largeClusterSizeThreshold
+	// LargeClusterSizeThreshold defines the threshold for determining large clusters.
+	// secondaryNodeEvictionRate is implicitly overridden to 0 for clusters smaller than or equal to this threshold
 	LargeClusterSizeThreshold int32
 	// Zone is treated as unhealthy in nodeEvictionRate and secondaryNodeEvictionRate when at least
 	// unhealthyZoneThreshold (no less than 3) of Nodes in the zone are NotReady
