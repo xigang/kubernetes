@@ -696,6 +696,85 @@ func TestScaleResource(t *testing.T) {
 	ps.VerifyPdbStatus(t, pdbName, disruptionsAllowed, pods, replicas-maxUnavailable, replicas, map[string]metav1.Time{})
 }
 
+// TestScaleResourceCache verifies that results of GET requests against the
+// scale subresource are cached and reused by subsequent syncs, and that the
+// cache entries expire after scaleCacheEntryTTL.
+func TestScaleResourceCache(t *testing.T) {
+	customResourceUID := uuid.NewUUID()
+	replicas := int32(10)
+	pods := int32(8)
+	maxUnavailable := int32(5)
+
+	_, ctx := ktesting.NewTestContext(t)
+	dc, ps := newFakeDisruptionController(ctx)
+
+	dc.scaleClient.AddReactor("get", "customresources", func(action core.Action) (handled bool, ret runtime.Object, err error) {
+		obj := &autoscalingapi.Scale{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: metav1.NamespaceDefault,
+				UID:       customResourceUID,
+			},
+			Spec: autoscalingapi.ScaleSpec{
+				Replicas: replicas,
+			},
+		}
+		return true, obj, nil
+	})
+
+	pdb, pdbName := newMaxUnavailablePodDisruptionBudget(t, intstr.FromInt32(maxUnavailable))
+	add(t, dc.pdbStore, pdb)
+
+	trueVal := true
+	for i := 0; i < int(pods); i++ {
+		pod, _ := newPod(t, fmt.Sprintf("pod-%d", i))
+		pod.SetOwnerReferences([]metav1.OwnerReference{
+			{
+				Kind:       customGVK.Kind,
+				APIVersion: customGVK.GroupVersion().String(),
+				Controller: &trueVal,
+				UID:        customResourceUID,
+			},
+		})
+		add(t, dc.podStore, pod)
+	}
+
+	scaleGets := func() int {
+		count := 0
+		for _, action := range dc.scaleClient.Actions() {
+			if action.Matches("get", "customresources") {
+				count++
+			}
+		}
+		return count
+	}
+
+	// Repeated syncs within the TTL should issue a single GET against the
+	// scale subresource.
+	for i := 0; i < 3; i++ {
+		if err := dc.sync(ctx, pdbName); err != nil {
+			t.Fatalf("unexpected error syncing PDB: %v", err)
+		}
+	}
+	if got := scaleGets(); got != 1 {
+		t.Errorf("expected 1 GET against the scale subresource, got %d", got)
+	}
+	// currentHealthy(8) - desiredHealthy(replicas(10) - maxUnavailable(5)) = 3 disruptions allowed.
+	ps.VerifyPdbStatus(t, pdbName, 3, pods, replicas-maxUnavailable, replicas, map[string]metav1.Time{})
+
+	// Once the cache entry expires, the next sync should issue a new GET and
+	// observe the updated scale.
+	replicas = 20
+	dc.clock.(*clocktesting.FakeClock).Step(scaleCacheEntryTTL + time.Second)
+	if err := dc.sync(ctx, pdbName); err != nil {
+		t.Fatalf("unexpected error syncing PDB: %v", err)
+	}
+	if got := scaleGets(); got != 2 {
+		t.Errorf("expected 2 GETs against the scale subresource, got %d", got)
+	}
+	// currentHealthy(8) - desiredHealthy(replicas(20) - maxUnavailable(5)) < 0, so no disruptions allowed.
+	ps.VerifyPdbStatus(t, pdbName, 0, pods, replicas-maxUnavailable, replicas, map[string]metav1.Time{})
+}
+
 func TestScaleFinderNoResource(t *testing.T) {
 	resourceName := "customresources"
 	testCases := map[string]struct {

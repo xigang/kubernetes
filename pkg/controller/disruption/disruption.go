@@ -33,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilcache "k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -75,6 +76,19 @@ const (
 	// Once the timeout is reached, this controller attempts to set the status
 	// of the condition to False.
 	stalePodDisruptionTimeout = 2 * time.Minute
+
+	// scaleCacheEntryTTL is how long a result of a GET request against the
+	// scale subresource is reused before issuing a new request. Syncing PDBs
+	// that select pods owned by the same custom resource within this window
+	// (e.g. by concurrent workers) results in a single /scale request instead
+	// of one per sync. It is kept short to bound how stale the scale used for
+	// the PDB calculations can get, since the controller has no watch on the
+	// scaled resources to invalidate the cache on changes.
+	scaleCacheEntryTTL = 10 * time.Second
+
+	// scaleCacheMaxSize bounds the number of entries in the scale
+	// subresource cache.
+	scaleCacheMaxSize = 4096
 )
 
 type updater func(context.Context, *policy.PodDisruptionBudget) error
@@ -85,6 +99,11 @@ type DisruptionController struct {
 
 	scaleNamespacer scaleclient.ScalesGetter
 	discoveryClient discovery.DiscoveryInterfaceWithContext
+
+	// scaleCache caches recent results of GET requests against the scale
+	// subresource, keyed by scaleCacheKey, to deduplicate requests made
+	// while syncing PDBs that select pods owned by the same resource.
+	scaleCache *utilcache.LRUExpireCache
 
 	pdbLister       policylisters.PodDisruptionBudgetLister
 	pdbListerSynced cache.InformerSynced
@@ -255,6 +274,7 @@ func NewDisruptionControllerInternal(ctx context.Context,
 	dc.mapper = restMapper
 	dc.scaleNamespacer = scaleNamespacer
 	dc.discoveryClient = discovery.ToDiscoveryInterfaceWithContext(discoveryClient)
+	dc.scaleCache = utilcache.NewLRUExpireCacheWithClock(scaleCacheMaxSize, clock)
 
 	dc.clock = clock
 
@@ -369,6 +389,13 @@ func (dc *DisruptionController) getPodReplicationController(ctx context.Context,
 	return &controllerAndScale{rc.UID, *(rc.Spec.Replicas)}, nil
 }
 
+// scaleCacheKey identifies a scale subresource in the scaleCache.
+type scaleCacheKey struct {
+	resource  schema.GroupResource
+	namespace string
+	name      string
+}
+
 func (dc *DisruptionController) getScaleController(ctx context.Context, controllerRef *metav1.OwnerReference, namespace string) (*controllerAndScale, error) {
 	gv, err := schema.ParseGroupVersion(controllerRef.APIVersion)
 	if err != nil {
@@ -385,6 +412,16 @@ func (dc *DisruptionController) getScaleController(ctx context.Context, controll
 		return nil, err
 	}
 	gr := mapping.Resource.GroupResource()
+
+	key := scaleCacheKey{resource: gr, namespace: namespace, name: controllerRef.Name}
+	if cached, ok := dc.scaleCache.Get(key); ok {
+		controllerNScale := cached.(controllerAndScale)
+		if controllerNScale.UID != controllerRef.UID {
+			return nil, nil
+		}
+		return &controllerNScale, nil
+	}
+
 	scale, err := dc.scaleNamespacer.Scales(namespace).Get(ctx, gr, controllerRef.Name, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -402,6 +439,7 @@ func (dc *DisruptionController) getScaleController(ctx context.Context, controll
 		}
 		return nil, err
 	}
+	dc.scaleCache.Add(key, controllerAndScale{scale.UID, scale.Spec.Replicas}, scaleCacheEntryTTL)
 	if scale.UID != controllerRef.UID {
 		return nil, nil
 	}
