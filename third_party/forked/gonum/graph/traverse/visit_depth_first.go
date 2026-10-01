@@ -24,7 +24,7 @@ type VisitingDepthFirst struct {
 	EdgeFilter func(graph.Edge) bool
 	Visit      func(u, v graph.Node)
 	stack      linear.NodeStack
-	visited    visitedSet
+	visited    visitedBitset
 
 	// State used by the shared visitor to avoid per-node allocations.
 	visiting graph.Node
